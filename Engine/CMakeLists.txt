@@ -1,6 +1,5 @@
 project(Engine)
 
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 file(GLOB_RECURSE SOURCES
         LIST_DIRECTORIES true
         ./*.h
@@ -13,6 +12,9 @@ if(LINUX)
     set(VOLK_STATIC_DEFINES VK_USE_PLATFORM_XCB_KHR)
 endif()
 
+
 add_library(${PROJECT_NAME} SHARED ${SOURCES})
 target_include_directories(${PROJECT_NAME} PRIVATE src PUBLIC include)
-target_link_libraries(${PROJECT_NAME} PUBLIC SDL3::SDL3 volk::volk vk-bootstrap::vk-bootstrap spdlog::spdlog)
+target_link_libraries(${PROJECT_NAME} PUBLIC SDL3::SDL3 spdlog::spdlog volk::volk vk-bootstrap::vk-bootstrap)
+
+

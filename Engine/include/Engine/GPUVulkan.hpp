@@ -4,6 +4,7 @@
 #include <vector>
 #include <unordered_map>
 #include <SDL3/SDL_video.h>
+#include <SDL3/SDL_events.h>
 
 struct Swapchain {
     VkSurfaceKHR surface;
@@ -22,9 +23,12 @@ class GPUVulkan final : public GPUDevice {
 public:
     GPUVulkan(SDL_Window* window, bool lowPower, bool debug);
     ~GPUVulkan() override;
+    
+    bool RegisterWindow(SDL_Window* window) override;
 
 private:
     bool RecreateSwapchain(SDL_Window* window);
+    static bool OnResize(void *userdata, SDL_Event *event);
 
 private:
     VkInstance m_instance;
@@ -32,7 +36,7 @@ private:
     VkPhysicalDevice m_physicalDevice;
     VkDebugUtilsMessengerEXT m_debugMessenger;
 
-    std::unordered_map<SDL_Window*, Swapchain> m_swapchains;
+    inline static std::unordered_map<SDL_Window*, Swapchain> m_swapchains;
 
     bool m_hasDebugUtils;
     bool m_hasColorSpaces;

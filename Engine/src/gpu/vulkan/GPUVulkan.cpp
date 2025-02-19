@@ -1,11 +1,12 @@
 #include "Engine/GPUVulkan.hpp"
 #include <VkBootstrap.h>
-#include <SDL3/SDL_vulkan.h>
 #include <spdlog/spdlog.h>
+#include <SDL3/SDL_vulkan.h>
 
 #define VK_CHECK_ABORT(value, message) if(value != VK_SUCCESS) {spdlog::critical(message); std::abort();}
 
-GPUVulkan::GPUVulkan(SDL_Window* window, bool lowPower, bool debug)  : GPUDevice() {
+GPUVulkan::GPUVulkan(SDL_Window* window, bool lowPower, bool debug) : GPUDevice() 
+{
     VK_CHECK_ABORT(volkInitialize(), "Failed to initialize Volk")
     auto systemInfoRes = vkb::SystemInfo::get_system_info();
     m_hasDebugUtils = systemInfoRes.has_value() && systemInfoRes.value().is_extension_available(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
@@ -103,10 +104,13 @@ GPUVulkan::GPUVulkan(SDL_Window* window, bool lowPower, bool debug)  : GPUDevice
     if (!RecreateSwapchain(window)) {
         std::abort();
     }
+    SDL_AddEventWatch(OnResize,(void*)window);
+    
     spdlog::info("Vulkan device [{0}] created successfully",vkbDevice.physical_device.name);
 }
 
-GPUVulkan::~GPUVulkan() {
+GPUVulkan::~GPUVulkan() 
+{
     vkDeviceWaitIdle(m_logicalDevice);
     for(auto& keyval : m_swapchains){
         Swapchain& swapchain = keyval.second; 
@@ -121,7 +125,28 @@ GPUVulkan::~GPUVulkan() {
     vkDestroyInstance(m_instance,nullptr);
 }
 
-bool GPUVulkan::RecreateSwapchain(SDL_Window *window) {
+bool GPUVulkan::RegisterWindow(SDL_Window *window)
+{
+    Swapchain swapchain;
+    swapchain.swapchain = VK_NULL_HANDLE;
+
+    if (!SDL_Vulkan_CreateSurface(window,m_instance,nullptr,&swapchain.surface)) {
+        spdlog::error("Failed to create Vulkan surface, {0}",SDL_GetError());
+        return false;
+    }
+
+    SDL_SyncWindow(window);
+    if (!SDL_GetWindowSizeInPixels(window,reinterpret_cast<int*>(&swapchain.recreateWidth),reinterpret_cast<int*>(&swapchain.recreateHeight))){
+        spdlog::error("Failed to get window size, {0}",SDL_GetError());
+        return false;
+    }
+    m_swapchains.emplace(window,swapchain);
+    SDL_AddEventWatch(OnResize,(void*)window);
+    return RecreateSwapchain(window);
+}
+
+bool GPUVulkan::RecreateSwapchain(SDL_Window *window)
+{
     Swapchain& swapchain = m_swapchains.at(window);
     vkb::SwapchainBuilder swapchainBuilder(m_physicalDevice,m_logicalDevice,swapchain.surface);
     auto swapchainRes = swapchainBuilder
@@ -148,5 +173,17 @@ bool GPUVulkan::RecreateSwapchain(SDL_Window *window) {
     swapchain.images = vkbSwapchain.get_images().value();
     swapchain.views = vkbSwapchain.get_image_views().value();
     swapchain.needsRecreation = false;
+    return true;
+}
+
+bool GPUVulkan::OnResize(void *userdata, SDL_Event *event)
+{
+    if(event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED && event->window.windowID == SDL_GetWindowID((SDL_Window*)userdata))
+    {
+        Swapchain& swapchain = m_swapchains[(SDL_Window*)userdata];
+        swapchain.recreateWidth = event->window.data1;
+        swapchain.recreateHeight = event->window.data2;
+        swapchain.needsRecreation = true;
+    }
     return true;
 }

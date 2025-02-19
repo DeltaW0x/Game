@@ -1,11 +1,11 @@
-#include "Engine/GPUVulkan.hpp"
+#include "VulkanDriver.hpp"
 #include <VkBootstrap.h>
 #include <spdlog/spdlog.h>
 #include <SDL3/SDL_vulkan.h>
 
 #define VK_CHECK_ABORT(value, message) if(value != VK_SUCCESS) {spdlog::critical(message); std::abort();}
 
-GPUVulkan::GPUVulkan(SDL_Window* window, bool lowPower, bool debug) : GPUDevice() 
+GPUDevice::Driver::Driver(SDL_Window* window, bool lowPower, bool debug)
 {
     VK_CHECK_ABORT(volkInitialize(), "Failed to initialize Volk")
     auto systemInfoRes = vkb::SystemInfo::get_system_info();
@@ -33,12 +33,13 @@ GPUVulkan::GPUVulkan(SDL_Window* window, bool lowPower, bool debug) : GPUDevice(
 
     m_instance = instanceRes.value().instance;
     m_debugMessenger = instanceRes.value().debug_messenger;
-    m_swapchains.emplace(window,Swapchain{});
+    m_commandBufferLock = SDL_CreateMutex();
 
     volkLoadInstance(m_instance);
 
-    Swapchain& swapchain = m_swapchains.at(window);
+    Swapchain swapchain;
     swapchain.swapchain = VK_NULL_HANDLE;
+    swapchain.window = window;
 
     if (!SDL_Vulkan_CreateSurface(window,m_instance,nullptr,&swapchain.surface)) {
         spdlog::critical("Failed to create Vulkan surface, {0}",SDL_GetError());
@@ -101,34 +102,33 @@ GPUVulkan::GPUVulkan(SDL_Window* window, bool lowPower, bool debug) : GPUDevice(
         spdlog::critical("Failed to get main window size, {0}",SDL_GetError());
         std::abort();
     }
+    m_swapchains.emplace(window,swapchain);
+    SDL_AddEventWatch(OnResize,(void*)window);
     if (!RecreateSwapchain(window)) {
         std::abort();
     }
-    SDL_AddEventWatch(OnResize,(void*)window);
-    
+    m_queue = vkbDevice.get_queue(vkb::QueueType::graphics).value();
+    m_queueIndex = vkbDevice.get_queue_index(vkb::QueueType::graphics).value();
+
     spdlog::info("Vulkan device [{0}] created successfully",vkbDevice.physical_device.name);
 }
 
-GPUVulkan::~GPUVulkan() 
+void GPUDevice::Driver::Destroy() 
 {
     vkDeviceWaitIdle(m_logicalDevice);
     for(auto& keyval : m_swapchains){
-        Swapchain& swapchain = keyval.second; 
-        for(auto& view : swapchain.views){
-            vkDestroyImageView(m_logicalDevice,view,nullptr);
-        }
-        vkDestroySwapchainKHR(m_logicalDevice,swapchain.swapchain,nullptr);
-        vkDestroySurfaceKHR(m_instance,swapchain.surface,nullptr);
+       UnregisterWindow(keyval.first);
     }
     vkDestroyDevice(m_logicalDevice,nullptr);
     vkDestroyDebugUtilsMessengerEXT(m_instance,m_debugMessenger,nullptr);
     vkDestroyInstance(m_instance,nullptr);
 }
 
-bool GPUVulkan::RegisterWindow(SDL_Window *window)
+bool GPUDevice::Driver::RegisterWindow(SDL_Window *window)
 {
     Swapchain swapchain;
     swapchain.swapchain = VK_NULL_HANDLE;
+    swapchain.window = window;
 
     if (!SDL_Vulkan_CreateSurface(window,m_instance,nullptr,&swapchain.surface)) {
         spdlog::error("Failed to create Vulkan surface, {0}",SDL_GetError());
@@ -145,7 +145,28 @@ bool GPUVulkan::RegisterWindow(SDL_Window *window)
     return RecreateSwapchain(window);
 }
 
-bool GPUVulkan::RecreateSwapchain(SDL_Window *window)
+void GPUDevice::Driver::UnregisterWindow(SDL_Window* window) 
+{
+    Swapchain& swapchain = m_swapchains.at(window); 
+    for(auto& view : swapchain.views){
+        vkDestroyImageView(m_logicalDevice,view,nullptr);
+    }
+    vkDestroySwapchainKHR(m_logicalDevice,swapchain.swapchain,nullptr);
+    vkDestroySurfaceKHR(m_instance,swapchain.surface,nullptr);
+}
+
+CommandBuffer* GPUDevice::Driver::AcquireCommandBuffer()
+{
+    SDL_ThreadID threadID = SDL_GetCurrentThreadID();
+    SDL_LockMutex(m_commandBufferLock);
+}
+
+bool GPUDevice::Driver::SubmitCommandBuffer(CommandBuffer* commandBuffer)
+{
+    
+}
+
+bool GPUDevice::Driver::RecreateSwapchain(SDL_Window *window)
 {
     Swapchain& swapchain = m_swapchains.at(window);
     vkb::SwapchainBuilder swapchainBuilder(m_physicalDevice,m_logicalDevice,swapchain.surface);
@@ -155,6 +176,7 @@ bool GPUVulkan::RecreateSwapchain(SDL_Window *window)
         .set_desired_extent(swapchain.recreateWidth, swapchain.recreateHeight)
         .add_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
         .set_old_swapchain(swapchain.swapchain)
+        .set_desired_min_image_count(2)
         .build();
     if (!swapchainRes.has_value()) {
         spdlog::critical("Failed to create swapchain, {0}",swapchainRes.error().message());
@@ -176,14 +198,40 @@ bool GPUVulkan::RecreateSwapchain(SDL_Window *window)
     return true;
 }
 
-bool GPUVulkan::OnResize(void *userdata, SDL_Event *event)
+VulkanCommandBuffer* GPUDevice::Driver::FetchCommandBuffer(SDL_ThreadID threadID) 
 {
-    if(event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED && event->window.windowID == SDL_GetWindowID((SDL_Window*)userdata))
-    {
-        Swapchain& swapchain = m_swapchains[(SDL_Window*)userdata];
-        swapchain.recreateWidth = event->window.data1;
-        swapchain.recreateHeight = event->window.data2;
-        swapchain.needsRecreation = true;
+  return nullptr;
+}
+
+VulkanCommandPool* GPUDevice::Driver::FetchCommandPool(SDL_ThreadID threadID) 
+{
+    if(m_commandPools.contains(threadID)){
+        return &m_commandPools.at(threadID);
     }
-    return true;
+
+    VulkanCommandPool commandPool = {
+        .threadID = threadID,
+        .inactiveCommandBuffers = {}
+    };
+
+    VkCommandPoolCreateInfo commandPoolCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = m_queueIndex
+    };
+    VK_CHECK_ABORT(vkCreateCommandPool(m_logicalDevice,&commandPoolCreateInfo,NULL,&commandPool.commandPool), "Failed to create vulkan command pool");
+    m_commandPools.emplace(threadID,commandPool);
+    return &m_commandPools.at(threadID);
+}
+
+bool GPUDevice::Driver::OnResize(void *userdata, SDL_Event *event) {
+  if (event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED &&
+      event->window.windowID == SDL_GetWindowID((SDL_Window *)userdata)) {
+    Swapchain &swapchain = m_swapchains[(SDL_Window *)userdata];
+    swapchain.recreateWidth = event->window.data1;
+    swapchain.recreateHeight = event->window.data2;
+    swapchain.needsRecreation = true;
+  }
+  return true;
 }
